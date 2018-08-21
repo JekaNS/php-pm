@@ -341,8 +341,10 @@ class ProcessSlave
     {
         $this->loop = Factory::create();
 
-        $this->errorLogger = BufferingLogger::create();
-        ErrorHandler::register(new ErrorHandler($this->errorLogger));
+        if($this->isLogging()) {
+            $this->errorLogger = BufferingLogger::create();
+            ErrorHandler::register( new ErrorHandler( $this->errorLogger ) );
+        }
 
         $this->tryConnect();
         $this->loop->run();

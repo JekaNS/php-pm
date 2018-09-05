@@ -13,6 +13,7 @@ use React\EventLoop\LoopInterface;
 use React\Http\Response;
 use React\Http\Server as HttpServer;
 use React\Promise\Promise;
+use React\Socket\Connection;
 use React\Socket\ConnectionInterface;
 use React\Socket\ServerInterface;
 use React\Socket\UnixConnector;
@@ -109,6 +110,12 @@ class ProcessSlave
      */
     protected $config;
 
+    /**
+     * Connection counter for control graceful shutdown
+     * @var int
+     */
+    protected $activeConnectionsCount = 0;
+
     public function __construct($socketpath, $bridgeName, $appBootstrap, array $config = [])
     {
         $this->setSocketPath($socketpath);
@@ -155,6 +162,8 @@ class ProcessSlave
             return;
         }
 
+        $this->inShutdown = true;
+
         if ($this->errorLogger && $logs = $this->errorLogger->cleanLogs()) {
             $messages = array_map(
                 function ($item) {
@@ -185,24 +194,33 @@ class ProcessSlave
             error_log(implode(PHP_EOL, $messages));
         }
 
-        $this->inShutdown = true;
+        $this->processGracefulShutdown();
+    }
 
-        if ($this->controller && $this->controller->isWritable()) {
-            $this->controller->close();
-        }
-        if ($this->server) {
-            @$this->server->close();
-        }
-
-        if (!$this->loop) {
-            exit;
+    public function processGracefulShutdown() {
+        if($this->activeConnectionsCount > 0) {
+            $this->loop->futureTick([$this,'processGracefulShutdown']);
+            return;
         }
 
-        $this->loop->futureTick(function () {
-            // watch source files with potentially fatal error for changes
-            $this->sendCurrentFiles();
-            $this->loop->stop();
-            exit;
+        $this->loop->futureTick(function(){
+            if ($this->controller && $this->controller->isWritable()) {
+                $this->controller->close();
+            }
+            if ($this->server) {
+                @$this->server->close();
+            }
+
+            if (!$this->loop) {
+                exit;
+            }
+
+            $this->loop->futureTick(function () {
+                // watch source files with potentially fatal error for changes
+                $this->sendCurrentFiles();
+                $this->loop->stop();
+                exit;
+            });
         });
     }
 
@@ -312,6 +330,14 @@ class ProcessSlave
 
                 $httpServer = new HttpServer([$this, 'onRequest']);
                 $httpServer->listen($this->server);
+
+                $this->server->on('connection', function(Connection $connection){
+                    ++$this->activeConnectionsCount;
+                    $connection->once('close', function() use($connection){
+                        //Connection end
+                        --$this->activeConnectionsCount;
+                    });
+                });
 
                 $this->sendMessage($this->controller, 'register', ['pid' => getmypid(), 'port' => $port]);
             }

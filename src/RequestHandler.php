@@ -297,7 +297,6 @@ class RequestHandler
             // slave was locked, so mark as closed now.
             $this->slave->close();
             $this->output->writeln(sprintf('Marking locked worker #%d as closed', $this->slave->getPort()));
-            $this->slave->getConnection()->close();
         } elseif ($this->slave->getStatus() !== Slave::CLOSED) {
             // if slave has already closed its connection to master,
             // it probably died and is already terminated

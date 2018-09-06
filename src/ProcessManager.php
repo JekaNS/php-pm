@@ -223,6 +223,13 @@ class ProcessManager
     const CONTROLLER_PORT = 5500;
 
     /**
+     * Increment/decrement counter for current unfinished requests.
+     * Used for graceful shutdown
+     * @var int
+     */
+    protected $requestsInProgressCounter = 0;
+
+    /**
      * ProcessManager constructor.
      *
      * @param OutputInterface $output
@@ -256,31 +263,48 @@ class ProcessManager
         $this->output->writeln("<info>Server is shutting down.</info>");
         $this->status = self::STATE_SHUTDOWN;
 
+
+        if($this->web) {
+            @$this->web->close(STREAM_SHUT_RD);
+        }
+
         $remainingSlaves = $this->slaveCount;
 
         if ($remainingSlaves === 0) {
             // if for some reason there are no workers, the close callback won't do anything, so just quit.
             $this->quit();
         } else {
-            $this->closeSlaves($graceful, function ($slave) use (&$remainingSlaves) {
-                $this->terminateSlave($slave);
-                $remainingSlaves--;
-
-                if ($this->output->isVeryVerbose()) {
-                    $this->output->writeln(
-                        sprintf(
-                            'Worker #%d terminated, %d more worker(s) to close.',
-                            $slave->getPort(),
-                            $remainingSlaves
-                        )
-                    );
-                }
-
-                if ($remainingSlaves === 0) {
-                    $this->quit();
-                }
-            });
+            $this->shutdownSlaves($remainingSlaves, $graceful);
         }
+    }
+
+    public function shutdownSlaves($remainingSlaves, $graceful = true) {
+
+        if($this->requestsInProgressCounter > 0) {
+            $this->loop->futureTick(function() use($remainingSlaves, $graceful){
+                $this->shutdownSlaves($remainingSlaves, $graceful);
+            });
+            return;
+        }
+
+        $this->closeSlaves($graceful, function ($slave) use (&$remainingSlaves) {
+            $this->terminateSlave($slave);
+            $remainingSlaves--;
+
+            if ($this->output->isVeryVerbose()) {
+                $this->output->writeln(
+                    sprintf(
+                        'Worker #%d terminated, %d more worker(s) to close.',
+                        $slave->getPort(),
+                        $remainingSlaves
+                    )
+                );
+            }
+
+            if ($remainingSlaves === 0) {
+                $this->quit();
+            }
+        });
     }
 
     /**
@@ -545,8 +569,13 @@ class ProcessManager
     public function onRequest(ConnectionInterface $incoming)
     {
         $this->handledRequests++;
+        $this->requestsInProgressCounter++;
 
         $handler = new RequestHandler($this->socketPath, $this->loop, $this->output, $this->slaves, $this->maxExecutionTime);
+        $incoming->on('close', function(){
+            $this->requestsInProgressCounter--;
+        });
+
         $handler->handle($incoming);
     }
 
@@ -1069,6 +1098,12 @@ class ProcessManager
                 $connection->on('close', function () use ($onSlaveClosed, $slave) {
                     $onSlaveClosed($slave);
                 });
+            }
+
+            /** @var Process */
+            $process = $slave->getProcess();
+            if ($process->isRunning()) {
+                $process->terminate($graceful ? $graceful : null);
             }
 
             if ($graceful && $slave->getStatus() === Slave::BUSY) {
